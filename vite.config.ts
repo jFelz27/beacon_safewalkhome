@@ -5,7 +5,7 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(({ command }) => {
   return {
-    // 🧠 AUTOMATIC PATH SWITCHER
+    // AUTOMATIC PATH SWITCHER
     // If running 'npm run build' on desktop, it uses the GitHub subfolder path.
     // If running in development (AI Studio simulator), it safely defaults to '/'.
     base: command === 'build' ? '/beacon_safewalkhome/' : '/', 
