@@ -92,7 +92,7 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
   final SafeWalkTimerProvider _timerProvider = SafeWalkTimerProvider();
 
   static const CameraPosition _initialPosition = CameraPosition(
-    target: LatLng(37.774929, -122.419416),
+    target: LatLng(30.267200, -97.743100),
     zoom: 14.4,
   );
 
@@ -103,7 +103,7 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
   Set<Polyline> _polylines = {};
   Set<Marker> _markers = {};
 
-  final TextEditingController _destinationController = TextEditingController(text: "Home (1420 Pine St)");
+  final TextEditingController _destinationController = TextEditingController(text: "Home (1100 Congress Ave)");
   final TextEditingController _etaController = TextEditingController(text: "15");
   final TextEditingController _passwordController = TextEditingController(text: "SAFEWALK2026");
 

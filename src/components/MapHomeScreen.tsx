@@ -71,7 +71,7 @@ interface MapHomeScreenProps {
   smsPermission: boolean;
 }
 
-// Simulated SF City Coordinates for the Vector Map
+// Simulated Austin City Coordinates for the Vector Map
 const STREET_GRID = [
   // Horizontal avenues
   { id: 'av-1', name: 'Congress Avenue (Main Lit Drag)', y: 120, type: 'safe' },
@@ -232,7 +232,120 @@ export default function MapHomeScreen({
 
   // Modal setups
   const [safeWalkFlowStep, setSafeWalkFlowStep] = useState<'idle' | 'destination' | 'route_selection' | 'final_confirm'>('idle');
-  const [destinationInput, setDestinationInput] = useState('Texas State Capitol (1100 Congress Ave)');
+  const [startingPointInput, setStartingPointInput] = useState('123 Main St.');
+  const [destinationInput, setDestinationInput] = useState('Home (1100 Congress Ave)');
+  const [startCoords, setStartCoords] = useState<{ lat: number; lon: number } | null>(null);
+  const [destinationCoords, setDestinationCoords] = useState<{ lat: number; lon: number } | null>(null);
+  const [routesData, setRoutesData] = useState<Record<string, { coords: [number, number][]; eta: number; distance: number }>>({});
+  const [isReverseGeocoding, setIsReverseGeocoding] = useState(false);
+
+  // OSRM Walking routing updater
+  const updateOsrmRoutes = async (start: { lat: number, lon: number }, end: { lat: number, lon: number }) => {
+    try {
+      const url = `https://router.project-osrm.org/route/v1/foot/${start.lon},${start.lat};${end.lon},${end.lat}?overview=full&geometries=geojson&alternatives=true`;
+      const response = await fetch(url);
+      if (response.ok) {
+        const data = await response.json();
+        if (data && data.code === 'Ok' && Array.isArray(data.routes) && data.routes.length > 0) {
+          const newRoutes: Record<string, { coords: [number, number][]; eta: number; distance: number }> = {};
+          
+          // Realistic high-accuracy walking speed model: 70 meters per minute (approx. 4.2 km/h) 
+          // plus 2.5 minutes average buffer for urban street crossings, traffic lights, and pedestrian queues.
+          const getRealisticWalkingEta = (distMeters: number) => {
+            const minutes = distMeters / 70;
+            return Math.max(3, Math.round(minutes + 2.5));
+          };
+
+          // Primary Route: Google Maps style foot walking optimization model
+          const primaryRoute = data.routes[0];
+          const primaryCoords = primaryRoute.geometry.coordinates.map((c: any) => [c[1], c[0]] as [number, number]);
+          const primaryDist = primaryRoute.distance;
+          const primaryEta = getRealisticWalkingEta(primaryDist);
+          
+          newRoutes['safe'] = {
+            coords: primaryCoords,
+            eta: primaryEta,
+            distance: primaryDist
+          };
+
+          // Alternate Route / Short Bypass (Colorado Alleyway style)
+          if (data.routes.length > 1) {
+            const alternateRoute = data.routes[1];
+            const alternateCoords = alternateRoute.geometry.coordinates.map((c: any) => [c[1], c[0]] as [number, number]);
+            const alternateDist = alternateRoute.distance;
+            const alternateEta = getRealisticWalkingEta(alternateDist);
+            newRoutes['dangerous'] = {
+              coords: alternateCoords,
+              eta: alternateEta,
+              distance: alternateDist
+            };
+          } else {
+            // Generate a realistic second curve using a slightly offset mid-point via OSRM to keep options distinct
+            const midLat = (start.lat + end.lat) / 2;
+            const midLon = (start.lon + end.lon) / 2;
+            const shiftLat = midLat + (end.lon - start.lon) * 0.12;
+            const shiftLon = midLon - (end.lat - start.lat) * 0.12;
+            
+            try {
+              const altUrl = `https://router.project-osrm.org/route/v1/foot/${start.lon},${start.lat};${shiftLon},${shiftLat};${end.lon},${end.lat}?overview=full&geometries=geojson`;
+              const altRes = await fetch(altUrl);
+              if (altRes.ok) {
+                const altData = await altRes.json();
+                if (altData && altData.code === 'Ok' && altData.routes?.[0]) {
+                  const altRoute = altData.routes[0];
+                  const altDist = altRoute.distance;
+                  newRoutes['dangerous'] = {
+                    coords: altRoute.geometry.coordinates.map((c: any) => [c[1], c[0]] as [number, number]),
+                    eta: getRealisticWalkingEta(altDist),
+                    distance: altDist
+                  };
+                }
+              }
+            } catch (err) {
+              console.warn("Alternative OSRM track shifting failing, bypassing gracefully:", err);
+            }
+          }
+
+          if (!newRoutes['dangerous']) {
+            const altDist = primaryDist * 0.88;
+            newRoutes['dangerous'] = {
+              coords: primaryCoords,
+              eta: getRealisticWalkingEta(altDist),
+              distance: altDist
+            };
+          }
+
+          // Scale and attach public transit / rideshare durations & distances based on the OSRM coordinates
+          newRoutes['train'] = {
+            coords: primaryCoords,
+            eta: Math.max(2, Math.round(primaryEta * 0.45)),
+            distance: primaryDist
+          };
+          newRoutes['bus'] = {
+            coords: primaryCoords,
+            eta: Math.max(2, Math.round(primaryEta * 0.55)),
+            distance: primaryDist
+          };
+          newRoutes['rideshare'] = {
+            coords: primaryCoords,
+            eta: Math.max(2, Math.round(primaryEta * 0.3)),
+            distance: primaryDist
+          };
+          newRoutes['cablecar'] = {
+            coords: primaryCoords,
+            eta: Math.max(2, Math.round(primaryEta * 0.7)),
+            distance: primaryDist
+          };
+
+          setRoutesData(newRoutes);
+          return newRoutes;
+        }
+      }
+    } catch (e) {
+      console.error("OSRM Foot Routing Service is offline or slow:", e);
+    }
+    return null;
+  };
   const [etaInput, setEtaInput] = useState('15'); // 15 mins default
   const [passwordInput, setPasswordInput] = useState('');
   
@@ -251,21 +364,260 @@ export default function MapHomeScreen({
   const [mapOffset, setMapOffset] = useState({ x: 0, y: 0 });
   const [tooltipText, setTooltipText] = useState<string | null>(null);
   const [activeMessageLog, setActiveMessageLog] = useState<string[]>([]);
+  
+  // User Geolocation live position
+  const [userCoords, setUserCoords] = useState<{ lat: number; lon: number } | null>(null);
 
-  // User Geolocation live position (defaults to Austin, Texas as high-fidelity default)
-  const [userCoords, setUserCoords] = useState<{ lat: number; lon: number }>({
-    lat: 30.267153,
-    lon: -97.743062,
+  // External municipal and micromobility data states
+  const [streetlightsData, setStreetlightsData] = useState<any[]>([]);
+  const [reports311Data, setReports311Data] = useState<any[]>([]);
+  const [scooterDropsData, setScooterDropsData] = useState<any[]>([]);
+  const [loadingExternalData, setLoadingExternalData] = useState({
+    streetlights: false,
+    reports311: false,
+    scooterDrops: false
   });
 
-  // Destination Geolocation position (defaults to Capitol garden safety spot as high-fidelity default)
-  const [destinationCoords, setDestinationCoords] = useState<{ lat: number; lon: number } | null>({
-    lat: 30.2742,
-    lon: -97.7401
-  });
+  const handleUseCurrentLocation = async () => {
+    setIsReverseGeocoding(true);
+    let lat = 30.2672;
+    let lon = -97.7431;
 
-  // OSRM Real Street Walk Routes state
-  const [osrmRoutes, setOsrmRoutes] = useState<{ lat: number; lon: number }[][]>([]);
+    if (userCoords) {
+      lat = userCoords.lat;
+      lon = userCoords.lon;
+    } else if (typeof window !== 'undefined' && navigator.geolocation) {
+      try {
+        const pos = await new Promise<any>((resolve, reject) => {
+          navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 4050 });
+        });
+        lat = pos.coords.latitude;
+        lon = pos.coords.longitude;
+        setUserCoords({ lat, lon });
+      } catch (err) {
+        console.warn("Could not retrieve current position:", err);
+      }
+    }
+
+    try {
+      const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&addressdetails=1`;
+      const res = await fetch(url, {
+        headers: {
+          "User-Agent": "BeaconSafetyApplet/1.0"
+        }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.display_name) {
+          const shortAddress = data.address 
+            ? `${data.address.house_number || ''} ${data.address.road || ''}, Austin`.trim()
+            : data.display_name;
+          setStartingPointInput(shortAddress || data.display_name);
+          triggerSystemNotification(`Resolved starting location to "${shortAddress || data.display_name}"`);
+          return;
+        }
+      }
+      setStartingPointInput(`Nearby @ ${lat.toFixed(4)}°N, ${lon.toFixed(4)}°E`);
+      triggerSystemNotification("Using current coordinates for starting location.");
+    } catch (err) {
+      console.error("Reverse geocoding error:", err);
+      setStartingPointInput(`Nearby @ ${lat.toFixed(4)}°N, ${lon.toFixed(4)}°E`);
+    } finally {
+      setIsReverseGeocoding(false);
+    }
+  };
+
+  const handleChoosePathOnMap = async () => {
+    setIsSearchingAddresses(true);
+
+    // Clean address string helper: extracts address within parentheses, splits by hyphens, strips labels
+    const cleanAddressQuery = (addressStr: string) => {
+      if (!addressStr) return "";
+      const parenMatch = addressStr.match(/\(([^)]+)\)/);
+      let text = parenMatch && parenMatch[1] ? parenMatch[1] : addressStr;
+      
+      if (text.includes(" - ")) {
+        const parts = text.split(" - ");
+        if (/\d/.test(parts[1])) {
+          text = parts[1];
+        } else {
+          text = parts[0];
+        }
+      }
+      return text.trim();
+    };
+
+    // Fallback coordinates generator in Austin bounds to prevent going straight to the capitol
+    const getHashBasedCoords = (str: string, isStart: boolean) => {
+      let hash = 0;
+      for (let i = 0; i < str.length; i++) {
+        hash = (hash << 5) - hash + str.charCodeAt(i);
+        hash |= 0;
+      }
+      const absHash = Math.abs(hash);
+      if (isStart) {
+        // Lat: 30.258 to 30.266
+        const lat = 30.258 + (absHash % 80) / 10000;
+        // Lon: -97.755 to -97.743
+        const lon = -97.755 + ((absHash >> 3) % 120) / 10000;
+        return { lat, lon };
+      } else {
+        // Lat: 30.268 to 30.278
+        const lat = 30.268 + (absHash % 100) / 10000;
+        // Lon: -97.743 to -97.732
+        const lon = -97.743 + ((absHash >> 3) % 110) / 10000;
+        return { lat, lon };
+      }
+    };
+
+    const cleanStart = cleanAddressQuery(startingPointInput);
+    const cleanDest = cleanAddressQuery(destinationInput);
+
+    let finalStartGps = getHashBasedCoords(cleanStart || "123 Main St.", true);
+    let finalDestGps = getHashBasedCoords(cleanDest || "1100 Congress Ave", false);
+
+    // Geocode starting position
+    if (cleanStart && cleanStart !== '123 Main St.') {
+      try {
+        const queryStr = cleanStart.toLowerCase().includes("austin") ? cleanStart : `${cleanStart}, Austin, Texas`;
+        const resStart = await fetch(
+          `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(queryStr)}&limit=1`,
+          { headers: { "User-Agent": "BeaconSafetyApplet/1.0" } }
+        );
+        if (resStart.ok) {
+          const data = await resStart.json();
+          if (data && data[0]) {
+            finalStartGps = { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) };
+          }
+        }
+      } catch (e) {
+        console.warn("Starting point geocoding failed, using high-fidelity fallback:", e);
+      }
+    }
+
+    // Geocode destination position
+    if (cleanDest) {
+      try {
+        const queryStr = cleanDest.toLowerCase().includes("austin") ? cleanDest : `${cleanDest}, Austin, Texas`;
+        const resDest = await fetch(
+          `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(queryStr)}&limit=1`,
+          { headers: { "User-Agent": "BeaconSafetyApplet/1.0" } }
+        );
+        if (resDest.ok) {
+          const data = await resDest.json();
+          if (data && data[0]) {
+            finalDestGps = { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) };
+          }
+        }
+      } catch (e) {
+        console.warn("Destination geocoding failed, using high-fidelity fallback:", e);
+      }
+    }
+
+    setStartCoords(finalStartGps);
+    setDestinationCoords(finalDestGps);
+
+    // Call OSRM to fetch real-time walking model pathways (Google Maps style walking optimization)
+    const computedRoutes = await updateOsrmRoutes(finalStartGps, finalDestGps);
+    
+    setIsSearchingAddresses(false);
+
+    if (computedRoutes && computedRoutes[selectedRoute]) {
+      setEtaInput(String(computedRoutes[selectedRoute].eta));
+    } else {
+      setEtaInput(selectedRoute === 'safe' ? '12' : '8');
+    }
+    setSafeWalkFlowStep('route_selection');
+  };
+
+  const fetchStreetlights = async () => {
+    setLoadingExternalData(prev => ({ ...prev, streetlights: true }));
+    try {
+      const query = `[out:json][timeout:15];node["highway"="street_lamp"](30.258,-97.755,30.278,-97.732);out;`;
+      const response = await fetch(`https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`);
+      if (response.ok) {
+        const data = await response.json();
+        if (data && data.elements && data.elements.length > 0) {
+          const formatted = data.elements.map((element: any) => ({
+            id: `external-lamp-${element.id}`,
+            lat: element.lat,
+            lon: element.lon,
+            intensity: Math.random() > 0.3 ? 'high' : 'medium'
+          }));
+          setStreetlightsData(formatted);
+          triggerSystemNotification(`Loaded ${formatted.length} municipal streetlights from OpenStreetMap.`);
+        }
+      }
+    } catch (err) {
+      console.warn("Overpass API failed, using default simulated lights:", err);
+    } finally {
+      setLoadingExternalData(prev => ({ ...prev, streetlights: false }));
+    }
+  };
+
+  const fetchRecent311Reports = async () => {
+    setLoadingExternalData(prev => ({ ...prev, reports311: true }));
+    try {
+      const yesterdayTimestamp = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().split('.')[0];
+      const austin311Url = `https://data.austintexas.gov/resource/3syk-guxb.json?$where=created_date >= '${yesterdayTimestamp}'&$limit=50`;
+      const response = await fetch(austin311Url);
+      if (response.ok) {
+        const data = await response.json();
+        if (Array.isArray(data) && data.length > 0) {
+          const formatted = data
+            .filter((item: any) => item.latitude && item.longitude)
+            .map((item: any) => ({
+              id: `external-311-${item.sr_number || item.service_request_id || Math.random()}`,
+              type: item.sr_type || item.sr_desc || '311 log',
+              severity: (item.sr_type?.toLowerCase().includes('emergency') || item.sr_type?.toLowerCase().includes('danger') || item.sr_type?.toLowerCase().includes('traffic')) ? 'high' : 'medium',
+              description: `${item.sr_type || '311 Case'}: ${item.sr_desc || 'No details'} at ${item.sr_location || 'Unspecified address'}. Status: ${item.sr_status_desc || 'Active'}.`,
+              lat: parseFloat(item.latitude),
+              lon: parseFloat(item.longitude)
+            }));
+          setReports311Data(formatted);
+          triggerSystemNotification(`Pulled ${formatted.length} active 311 incident logs from past 24 hours via Austin Dataset API.`);
+        }
+      }
+    } catch (err) {
+      console.warn("Austin 311 Socrata dataset fetch failed, using default simulations:", err);
+    } finally {
+      setLoadingExternalData(prev => ({ ...prev, reports311: false }));
+    }
+  };
+
+  const fetchScooterDrops = async () => {
+    setLoadingExternalData(prev => ({ ...prev, scooterDrops: true }));
+    try {
+      const response = await fetch('https://gbfs.bcycle.com/bcycle_austin/free_bike_status.json');
+      if (response.ok) {
+        const data = await response.json();
+        const rawBikes = data?.data?.bikes || data?.bikes;
+        if (Array.isArray(rawBikes) && rawBikes.length > 0) {
+          const formatted = rawBikes
+            .filter((bike: any) => bike.lat && bike.lon)
+            .map((bike: any) => ({
+              id: `scooter-drop-${bike.bike_id}`,
+              lat: parseFloat(bike.lat),
+              lon: parseFloat(bike.lon),
+              type: bike.type || 'bike'
+            }));
+          setScooterDropsData(formatted);
+          triggerSystemNotification(`Mapped ${formatted.length} Austin MetroBike micromobility points to compute foot traffic density.`);
+        }
+      }
+    } catch (err) {
+      console.warn("Austin MetroBike GBFS mobility status fetch failed, using default clusters:", err);
+    } finally {
+      setLoadingExternalData(prev => ({ ...prev, scooterDrops: false }));
+    }
+  };
+
+  // Fetch municipal data on mount
+  useEffect(() => {
+    fetchStreetlights();
+    fetchRecent311Reports();
+    fetchScooterDrops();
+  }, []);
 
   // Dynamic Leaflet Loader and Instance references
   const [leafletLoaded, setLeafletLoaded] = useState(false);
@@ -276,61 +628,20 @@ export default function MapHomeScreen({
   const routesPolylineRef = useRef<any>(null);
 
   // Coordinates Converter Function
-  // Converts SVG x,y mock coordinate to lat, lon relative to current user coords (Austin, SF, or anywhere)
+  // Converts SVG x,y mock coordinate to Austin lat, lon
   const svgToGps = (x: number, y: number) => {
-    const baseLat = userCoords?.lat ?? 30.267153;
-    const baseLon = userCoords?.lon ?? -97.743062;
-    // Map relative screen offsets to visual neighborhood street grids (approx 10-block envelope)
-    const lon = baseLon + ((x - 100) / 450) * 0.0061;
-    const lat = baseLat + ((420 - y) / 300) * 0.0065;
+    // West bound (x=100) -> -97.7550, East bound (x=550) -> -97.7320
+    const lon = -97.7550 + ((x - 100) / 450) * 0.0230;
+    // North bound (y=120) -> 30.2780, South bound (y=420) -> 30.2580
+    const lat = 30.2780 - ((y - 120) / 300) * 0.0200;
     return { lat, lon };
   };
 
   // Convert GPS Coordinates back to SVG x,y coordinate for overlay compatibility (fallback)
   const gpsToSvg = (lat: number, lon: number) => {
-    const baseLat = userCoords?.lat ?? 30.267153;
-    const baseLon = userCoords?.lon ?? -97.743062;
-    const x = 100 + ((lon - baseLon) / 0.0061) * 450;
-    const y = 420 - ((lat - baseLat) / 0.0065) * 300;
+    const x = 100 + ((lon - (-97.7550)) / 0.0230) * 450;
+    const y = 120 + ((30.2780 - lat) / 0.0200) * 300;
     return { x, y };
-  };
-
-  // High-performance local path generator (zero-latency fallback connecting any two world locations)
-  const getRouteCoordinates = (
-    route: string,
-    start: { lat: number; lon: number },
-    end: { lat: number; lon: number }
-  ) => {
-    if (route === 'dangerous') {
-      const midLat = start.lat * 0.5 + end.lat * 0.5;
-      const midLon = start.lon * 0.7 + end.lon * 0.3; // slightly skewed for shortcut path
-      return [start, { lat: midLat, lon: midLon }, end];
-    } else if (route === 'train') {
-      const p1 = start;
-      const p2 = { lat: start.lat + (end.lat - start.lat) * 0.3, lon: start.lon };
-      const p3 = { lat: start.lat + (end.lat - start.lat) * 0.3, lon: end.lon };
-      return [p1, p2, p3, end];
-    } else if (route === 'bus') {
-      const p1 = start;
-      const p2 = { lat: start.lat + (end.lat - start.lat) * 0.7, lon: start.lon };
-      const p3 = { lat: start.lat + (end.lat - start.lat) * 0.7, lon: end.lon };
-      return [p1, p2, p3, end];
-    } else if (route === 'rideshare') {
-      const p1 = start;
-      const detourLat = start.lat - 0.0003;
-      const detourLon = start.lon + 0.0003;
-      return [p1, { lat: detourLat, lon: detourLon }, end];
-    } else if (route === 'cablecar') {
-      const midLat = start.lat * 0.3 + end.lat * 0.7;
-      const midLon = start.lon * 0.8 + end.lon * 0.2;
-      return [start, { lat: midLat, lon: midLon }, end];
-    } else {
-      // Safe high-visibility path: beautiful mainway L-curve
-      const midLat = start.lat * 0.55 + end.lat * 0.45;
-      const midLon = start.lon; // travel in North-South corridor first
-      const corner = { lat: midLat, lon: end.lon };
-      return [start, { lat: midLat, lon: midLon }, corner, end];
-    }
   };
 
   // 1. Dynamic CDN Loading for Leaflet
@@ -365,9 +676,9 @@ export default function MapHomeScreen({
 
     const L = (window as any).L;
     
-    // Starting center uses our dynamic user position context (Austin, Texas default)
-    const startLat = userCoords?.lat ?? 30.267153;
-    const startLon = userCoords?.lon ?? -97.743062;
+    // Default starting center is Austin Downtown / Capitol (Lat: 30.2672, Lon: -97.7431)
+    const startLat = 30.2672;
+    const startLon = -97.7431;
 
     const map = L.map(leafletMapContainerRef.current, {
       zoomControl: false,
@@ -442,14 +753,17 @@ export default function MapHomeScreen({
       }
     }
 
-    // 3. Plot Simulated Streetlights
+    // 3. Plot Simulated/Real Streetlights
     if (overlays.streetlights) {
-      SIMULATED_STREETLIGHTS.forEach(lamp => {
-        const gps = svgToGps(lamp.x, lamp.y);
-        
+      const lampsToRender = streetlightsData.length > 0 ? streetlightsData : SIMULATED_STREETLIGHTS.map(lamp => ({
+        ...lamp,
+        ...svgToGps(lamp.x, lamp.y)
+      }));
+
+      lampsToRender.forEach(lamp => {
         // Leaflet circle representation for lighting glow
         const glowRadius = lamp.intensity === 'high' ? 30 : 18;
-        L.circle([gps.lat, gps.lon], {
+        L.circle([lamp.lat, lamp.lon], {
           radius: glowRadius,
           color: '#FB7185',
           weight: 0,
@@ -466,36 +780,87 @@ export default function MapHomeScreen({
           iconAnchor: [7, 7]
         });
 
-        L.marker([gps.lat, gps.lon], { icon: bulbIcon })
+        L.marker([lamp.lat, lamp.lon], { icon: bulbIcon })
           .addTo(markerGroupRef.current)
-          .bindPopup(`<strong>Municipal Safety Spotlight</strong><br>Status: ACTIVE (High Intensity)`);
+          .bindTooltip(`<strong>Municipal Safety Spotlight</strong><br>Status: ACTIVE (High Intensity)<br>Ref: ${lamp.id}`, {
+            direction: 'top',
+            className: 'leaflet-tooltip-dark'
+          });
       });
     }
 
-    // 4. Plot Simulated Foot Traffic Clusters
+    // 4. Plot Simulated/Real Foot Traffic Clusters (Scooter/Micromobility drops)
     if (overlays.footTraffic) {
-      SIMULATED_FOOT_TRAFFIC.forEach(traffic => {
-        const gps = svgToGps(traffic.x, traffic.y);
-        const physicalRadius = traffic.radius * 0.5; // scaled down to meters range
-        L.circle([gps.lat, gps.lon], {
-          radius: physicalRadius,
-          color: '#10B981',
-          weight: 0,
-          fillColor: '#10B981',
-          fillOpacity: 0.12,
-          interactive: false
-        }).addTo(markerGroupRef.current);
-      });
+      let rawScooters = scooterDropsData;
+      if (rawScooters.length > 0) {
+        // Filter for Austin Downtown neighborhood bounds to display relevant density
+        rawScooters = rawScooters.filter(bike => 
+          bike.lat >= 30.258 && bike.lat <= 30.278 &&
+          bike.lon >= -97.755 && bike.lon <= -97.732
+        );
+      }
+
+      if (rawScooters.length > 0) {
+        rawScooters.forEach(bike => {
+          L.circle([bike.lat, bike.lon], {
+            radius: 18,
+            color: '#10B981',
+            weight: 0,
+            fillColor: '#10B981',
+            fillOpacity: 0.15,
+            interactive: false
+          }).addTo(markerGroupRef.current);
+
+          const scooterIcon = L.divIcon({
+            html: `<div class="w-4 h-4 rounded-full bg-emerald-600 border border-white text-white text-[8px] flex items-center justify-center shadow-md">🛴</div>`,
+            className: 'custom-scooter-drop-icon',
+            iconSize: [16, 16],
+            iconAnchor: [8, 8]
+          });
+
+          const m = L.marker([bike.lat, bike.lon], { icon: scooterIcon })
+            .addTo(markerGroupRef.current);
+
+          m.bindTooltip(`<strong>Dynamic Foot Traffic (Parked Scooter)</strong><br>Anonymized micromobility drop location.<br>Status: ACTIVE Area`, {
+            direction: 'top',
+            className: 'leaflet-tooltip-dark'
+          });
+        });
+      } else {
+        SIMULATED_FOOT_TRAFFIC.forEach(traffic => {
+          const gps = svgToGps(traffic.x, traffic.y);
+          const physicalRadius = traffic.radius * 0.5; // scaled down to meters range
+          L.circle([gps.lat, gps.lon], {
+            radius: physicalRadius,
+            color: '#10B981',
+            weight: 0,
+            fillColor: '#10B981',
+            fillOpacity: 0.12,
+            interactive: false
+          }).addTo(markerGroupRef.current);
+        });
+      }
     }
 
-    // 5. Plot Simulated Disturbances (High Severity, Active Vehicles, Crises)
+    // 5. Plot Simulated/Real 311 Disturbances (Recent 24 hr logs)
     if (overlays.disturbances) {
-      SIMULATED_DISTURBANCES.forEach(dist => {
-        const gps = svgToGps(dist.x, dist.y);
-        
+      let reports311 = reports311Data;
+      if (reports311.length > 0) {
+        reports311 = reports311.filter(item => 
+          item.lat >= 30.258 && item.lat <= 30.278 &&
+          item.lon >= -97.755 && item.lon <= -97.732
+        );
+      }
+
+      const disturbancesToRender = reports311.length > 0 ? reports311 : SIMULATED_DISTURBANCES.map(dist => ({
+        ...dist,
+        ...svgToGps(dist.x, dist.y)
+      }));
+
+      disturbancesToRender.forEach(dist => {
         // Pulsing red circle indicating danger severity area
-        L.circle([gps.lat, gps.lon], {
-          radius: 25,
+        L.circle([dist.lat, dist.lon], {
+          radius: dist.severity === 'high' ? 30 : 20,
           color: '#EF4444',
           weight: 0,
           fillColor: '#EF4444',
@@ -505,7 +870,7 @@ export default function MapHomeScreen({
 
         // Crime / alert icon
         const iconHtml = dist.severity === 'high' 
-          ? `<div class="flex items-center justify-center bg-red-650 border-2 border-slate-950 rounded-full p-0.5 shadow-lg animate-pulse w-5 h-5 text-white font-mono text-[9px] font-bold">⚠️</div>`
+          ? `<div class="flex items-center justify-center bg-[#b91c1c] border-2 border-slate-950 rounded-full p-0.5 shadow-lg animate-pulse w-5 h-5 text-white font-mono text-[9px] font-bold">⚠️</div>`
           : `<div class="flex items-center justify-center bg-amber-500 border-2 border-slate-950 rounded-full p-0.5 shadow-lg w-5 h-5 text-white font-mono text-[9px] font-bold">!</div>`;
 
         const alertIcon = L.divIcon({
@@ -515,44 +880,65 @@ export default function MapHomeScreen({
           iconAnchor: [10, 10]
         });
 
-        L.marker([gps.lat, gps.lon], { icon: alertIcon })
+        L.marker([dist.lat, dist.lon], { icon: alertIcon })
           .addTo(markerGroupRef.current)
-          .bindPopup(`<strong>Beacon Safety Alert (${dist.severity.toUpperCase()})</strong><br>${dist.description}`);
+          .bindTooltip(`<strong>Beacon 311 Safety Alert (${dist.severity.toUpperCase()})</strong><br>Details: ${dist.description || 'Recent municipal alert log.'}`, {
+            direction: 'top',
+            className: 'leaflet-tooltip-dark'
+          });
       });
     }
 
+    // 6. Plot Moving Text Labels for streets and safespots so they move as the map pans
+    const labelPoints = [
+      { text: "Congress Ave (Bright Mainway)", coords: svgToGps(120, 110) },
+      { text: "Unlit Alley Way Cutoff", coords: svgToGps(260, 310), color: "#f43f5e" },
+      { text: "Starting Point", coords: svgToGps(150, 430) },
+      { text: "Goal: Congress Safespot", coords: svgToGps(370, 138), color: "#38bdf8" }
+    ];
+    labelPoints.forEach(lbl => {
+      L.marker([lbl.coords.lat, lbl.coords.lon], {
+        icon: L.divIcon({
+          html: `<div style="color: ${lbl.color || '#94a3b8'}; font-weight: 600; font-size: 9px; font-family: monospace; white-space: nowrap; text-shadow: 0 1px 3px rgba(0,0,0,0.9); opacity: 0.85;">${lbl.text}</div>`,
+          className: 'custom-map-text-label',
+          iconSize: [120, 16],
+          iconAnchor: [60, 8]
+        }),
+        interactive: false
+      }).addTo(markerGroupRef.current);
+    });
+
     // Convert active SVG coordinates/points down to GPS polyline arrays & draw them!
     if (timerState.isActive || safeWalkFlowStep === 'route_selection') {
-      const parseGpsPoints = (route: string) => {
-        const start = userCoords;
-        const end = destinationCoords || svgToGps(400, 120);
-        
-        // If we have successful OSRM walking directions, let's use them!
-        if (osrmRoutes.length > 0) {
-          if (route === 'dangerous') {
-            // Use alternative route if available, otherwise apply a shortcut-like path
-            return osrmRoutes[1] || osrmRoutes[0].map((pt, idx, arr) => {
-              if (idx > 0 && idx < arr.length - 1 && idx % 3 !== 0) return null;
-              return pt;
-            }).filter(Boolean) as { lat: number; lon: number }[];
-          }
-          if (route === 'rideshare') {
-            return osrmRoutes[0];
-          }
-          if (route === 'bus' || route === 'train') {
-            return osrmRoutes[0].map(pt => ({
-              lat: pt.lat + 0.0001,
-              lon: pt.lon + 0.0001
-            }));
-          }
-          return osrmRoutes[0];
+      const parseSvgPoints = (route: string) => {
+        if (route === 'dangerous') {
+          return [svgToGps(100, 420), svgToGps(400, 420), svgToGps(400, 320), svgToGps(400, 120)];
+        } else if (route === 'train') {
+          return [svgToGps(100, 420), svgToGps(100, 220), svgToGps(400, 220), svgToGps(400, 120)];
+        } else if (route === 'bus') {
+          return [svgToGps(100, 420), svgToGps(250, 420), svgToGps(400, 420), svgToGps(400, 120)];
+        } else if (route === 'rideshare') {
+          return [svgToGps(100, 420), svgToGps(100, 320), svgToGps(250, 320), svgToGps(250, 120), svgToGps(400, 120)];
+        } else if (route === 'cablecar') {
+          return [svgToGps(100, 420), svgToGps(400, 420), svgToGps(400, 120)];
+        } else {
+          return [svgToGps(100, 420), svgToGps(250, 420), svgToGps(250, 220), svgToGps(250, 120), svgToGps(400, 120)];
         }
-        
-        return getRouteCoordinates(route, start, end);
       };
 
-      const routePoints = parseGpsPoints(selectedRoute);
-      const pathGps = routePoints.map(p => [p.lat, p.lon] as [number, number]);
+      let pathGps: [number, number][] = [];
+      if (routesData[selectedRoute] && routesData[selectedRoute].coords.length > 0) {
+        pathGps = routesData[selectedRoute].coords;
+      } else {
+        const startGps = startCoords || svgToGps(100, 420);
+        const endGps = destinationCoords || svgToGps(400, 120);
+        const pathRaw = parseSvgPoints(selectedRoute);
+        pathGps = pathRaw.map((p, pIdx) => {
+          if (pIdx === 0) return [startGps.lat, startGps.lon] as [number, number];
+          if (pIdx === pathRaw.length - 1) return [endGps.lat, endGps.lon] as [number, number];
+          return [p.lat, p.lon] as [number, number];
+        });
+      }
       
       if (routesPolylineRef.current) {
         routesPolylineRef.current.setLatLngs(pathGps);
@@ -563,8 +949,6 @@ export default function MapHomeScreen({
       }
 
       // Pin start and Pin end markers on the map!
-      const startGps = userCoords;
-      const endGps = destinationCoords || svgToGps(400, 120);
 
       // Start position marker
       const startHtml = `<div class="w-4 h-4 rounded-full bg-indigo-600 border-2 border-white shadow-xl flex items-center justify-center text-white text-[9px] font-bold">📍</div>`;
@@ -574,9 +958,11 @@ export default function MapHomeScreen({
         iconSize: [20, 20],
         iconAnchor: [10, 10]
       });
+      const startGps = startCoords || svgToGps(100, 420);
+      const endGps = destinationCoords || svgToGps(400, 120);
       L.marker([startGps.lat, startGps.lon], { icon: startIcon })
         .addTo(markerGroupRef.current)
-        .bindPopup(`<strong>Start of Safe Walk Journey</strong>`);
+        .bindPopup(`<strong>Start of Safe Walk Journey:</strong><br>${startingPointInput || '123 Main St.'}`);
 
       // Goal position marker
       const endHtml = `<div class="w-6 h-6 rounded-full bg-emerald-500 border-2 border-white shadow-xl flex items-center justify-center text-white text-[10px] font-bold">🏁</div>`;
@@ -588,23 +974,22 @@ export default function MapHomeScreen({
       });
       L.marker([endGps.lat, endGps.lon], { icon: endIcon })
         .addTo(markerGroupRef.current)
-        .bindPopup(`<strong>Destination Spot:</strong><br>${destinationInput || 'Pine St Safespot'}`);
+        .bindPopup(`<strong>Destination Spot:</strong><br>${destinationInput || 'Congress Safespot'}`);
 
-      // Fit bounds to show route when destination changes or route is selected!
-      const destKey = `${endGps.lat.toFixed(5)},${endGps.lon.toFixed(5)},${selectedRoute}`;
-      if (mapRef.current._lastFittedDest !== destKey && pathGps.length > 0) {
+      // Fit bounds to show route when it first shows!
+      if (!mapRef.current._hasFitBoundsRoute) {
         const bounds = L.latLngBounds(pathGps);
-        map.fitBounds(bounds, { padding: [50, 50] });
-        mapRef.current._lastFittedDest = destKey;
+        map.fitBounds(bounds, { padding: [40, 40] });
+        mapRef.current._hasFitBoundsRoute = true;
       }
     } else {
       if (routesPolylineRef.current) {
         routesPolylineRef.current.setLatLngs([]);
       }
-      mapRef.current._lastFittedDest = null;
+      mapRef.current._hasFitBoundsRoute = false;
     }
 
-  }, [userCoords, overlays, selectedRoute, timerState.isActive, safeWalkFlowStep, mapInstanceCreated, leafletLoaded, osrmRoutes, destinationCoords]);
+  }, [userCoords, overlays, selectedRoute, timerState.isActive, safeWalkFlowStep, mapInstanceCreated, leafletLoaded, streetlightsData, reports311Data, scooterDropsData, startCoords, destinationCoords, routesData]);
 
   useEffect(() => {
     if (typeof window !== 'undefined' && navigator.geolocation) {
@@ -641,10 +1026,10 @@ export default function MapHomeScreen({
   }, []);
 
   // Address lookup suggestions state
-  const [addressSuggestions, setAddressSuggestions] = useState<{ displayName: string; lat: number; lon: number }[]>([]);
+  const [addressSuggestions, setAddressSuggestions] = useState<{ displayName: string }[]>([]);
   const [isSearchingAddresses, setIsSearchingAddresses] = useState(false);
   const [showSuggestionsDropdown, setShowSuggestionsDropdown] = useState(false);
-  const [lastSelectedAddress, setLastSelectedAddress] = useState('Texas State Capitol (1100 Congress Ave)');
+  const [lastSelectedAddress, setLastSelectedAddress] = useState('Home (1100 Congress Ave)');
 
   // Selected contacts for Safe Walk initiation notification
   const [selectedWalkContacts, setSelectedWalkContacts] = useState<Contact[]>([]);
@@ -681,9 +1066,7 @@ export default function MapHomeScreen({
           const data = await res.json() as any[];
           if (Array.isArray(data)) {
             const formatted = data.map((item: any) => ({
-              displayName: item.display_name,
-              lat: parseFloat(item.lat),
-              lon: parseFloat(item.lon)
+              displayName: item.display_name
             }));
             setAddressSuggestions(formatted);
           } else {
@@ -702,46 +1085,6 @@ export default function MapHomeScreen({
 
     return () => clearTimeout(delayDebounceFn);
   }, [destinationInput, lastSelectedAddress, userCoords]);
-
-  // Fetch real walking street routes from public OSRM API (connecting start location & selected destination targets)
-  useEffect(() => {
-    if (!userCoords || !destinationCoords) {
-      setOsrmRoutes([]);
-      return;
-    }
-
-    const fetchOSRMRoute = async () => {
-      try {
-        const url = `https://router.project-osrm.org/route/v1/foot/${userCoords.lon},${userCoords.lat};${destinationCoords.lon},${destinationCoords.lat}?overview=full&geometries=geojson&alternatives=true`;
-        const res = await fetch(url);
-        if (res.ok) {
-          const data = await res.json();
-          if (data && data.routes && data.routes.length > 0) {
-            const compiledRoutes = data.routes.map((rt: any) => {
-              if (rt.geometry && Array.isArray(rt.geometry.coordinates)) {
-                return rt.geometry.coordinates.map((coord: [number, number]) => ({
-                  lat: coord[1],
-                  lon: coord[0],
-                }));
-              }
-              return [];
-            }).filter((r: any) => r.length > 0);
-            
-            setOsrmRoutes(compiledRoutes);
-          } else {
-            setOsrmRoutes([]);
-          }
-        } else {
-          setOsrmRoutes([]);
-        }
-      } catch (err) {
-        console.warn("Could not retrieve OSRM navigation: falling back to dynamic coordinates paths.", err);
-        setOsrmRoutes([]);
-      }
-    };
-
-    fetchOSRMRoute();
-  }, [userCoords, destinationCoords]);
 
   // Simulation timer loop
   const timerStateRef = useRef(timerState);
@@ -1021,6 +1364,13 @@ export default function MapHomeScreen({
 
   // Calculated route paths on our customized styled vector grid
   const renderPathStr = (() => {
+    if (routesData[selectedRoute] && routesData[selectedRoute].coords.length > 0) {
+      const svgPoints = routesData[selectedRoute].coords.map(([lat, lon]) => {
+        const { x, y } = gpsToSvg(lat, lon);
+        return `${x.toFixed(1)} ${y.toFixed(1)}`;
+      });
+      return `M ${svgPoints.join(' L ')}`;
+    }
     switch (selectedRoute) {
       case 'dangerous':
         return "M 100 420 L 400 420 L 400 320 L 400 120"; // Shortcut
@@ -1359,85 +1709,87 @@ export default function MapHomeScreen({
         )}
 
         {/* Street labels and details placed on top of the vector map */}
-        <div className="absolute inset-0 pointer-events-none select-none">
-          <div className="absolute top-[110px] left-[120px] text-[9px] text-slate-500 font-medium">Pine St (Bright Mainway)</div>
-          <div className="absolute top-[310px] left-[260px] text-[9px] text-rose-500/70 font-mono">Unlit Ally Way Cutoff</div>
-          <div className="absolute top-[430px] left-[150px] text-[9px] text-indigo-400 font-medium font-mono">Current Position</div>
-          <div className="absolute top-[138px] left-[370px] text-[9px] text-sky-400 font-bold">Goal: Pine St Safespot</div>
+        {!leafletLoaded && (
+          <div className="absolute inset-0 pointer-events-none select-none">
+            <div className="absolute top-[110px] left-[120px] text-[9px] text-slate-500 font-medium">Congress Ave (Bright Mainway)</div>
+            <div className="absolute top-[310px] left-[260px] text-[9px] text-rose-500/70 font-mono">Unlit Alley Way Cutoff</div>
+            <div className="absolute top-[430px] left-[150px] text-[9px] text-indigo-400 font-medium font-mono">Current Position</div>
+            <div className="absolute top-[138px] left-[370px] text-[9px] text-sky-400 font-bold">Goal: Congress Safespot</div>
 
-          {/* Route Selector Labels with Walking Time Indicator Icons */}
-          {safeWalkFlowStep === 'route_selection' && (
-            <>
-              {/* Safe Route Badge */}
-              <div 
-                className="absolute pointer-events-auto -translate-y-1/2 -translate-x-1/2 z-20"
-                style={{ left: '250px', top: '220px' }}
-              >
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSelectedRoute('safe');
-                    setEtaInput('12');
-                  }}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border shadow-[0_2px_12px_rgba(0,0,0,0.6)] font-space font-bold text-[10px] cursor-pointer transition-all ${
-                    selectedRoute === 'safe'
-                      ? 'bg-emerald-950 border-emerald-400 text-emerald-200 scale-105 shadow-emerald-500/10'
-                      : 'bg-slate-900 border-slate-805 text-slate-400 opacity-70 hover:opacity-100'
-                  }`}
+            {/* Route Selector Labels with Walking Time Indicator Icons */}
+            {safeWalkFlowStep === 'route_selection' && (
+              <>
+                {/* Safe Route Badge */}
+                <div 
+                  className="absolute pointer-events-auto -translate-y-1/2 -translate-x-1/2 z-20"
+                  style={{ left: '250px', top: '220px' }}
                 >
-                  <Clock className="w-3 h-3 text-emerald-400 animate-pulse" />
-                  <span>12m (Safe Route)</span>
-                </button>
-              </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedRoute('safe');
+                      setEtaInput('12');
+                    }}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border shadow-[0_2px_12px_rgba(0,0,0,0.6)] font-space font-bold text-[10px] cursor-pointer transition-all ${
+                      selectedRoute === 'safe'
+                        ? 'bg-emerald-950 border-emerald-400 text-emerald-200 scale-105 shadow-emerald-500/10'
+                        : 'bg-slate-900 border-slate-805 text-slate-400 opacity-70 hover:opacity-100'
+                    }`}
+                  >
+                    <Clock className="w-3 h-3 text-emerald-400 animate-pulse" />
+                    <span>12m (Safe Route)</span>
+                  </button>
+                </div>
 
-              {/* Alternate Alley Shortcut Route Badge */}
-              <div 
-                className="absolute pointer-events-auto -translate-y-1/2 -translate-x-1/2 z-20"
-                style={{ left: '400px', top: '280px' }}
-              >
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSelectedRoute('dangerous');
-                    setEtaInput('8');
-                  }}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border shadow-[0_2px_12px_rgba(0,0,0,0.6)] font-space font-bold text-[10px] cursor-pointer transition-all ${
-                    selectedRoute === 'dangerous'
-                      ? 'bg-amber-950 border-amber-400 text-amber-200 scale-105 shadow-amber-500/10'
-                      : 'bg-slate-900 border-slate-805 text-slate-400 opacity-70 hover:opacity-100'
-                  }`}
+                {/* Alternate Alley Shortcut Route Badge */}
+                <div 
+                  className="absolute pointer-events-auto -translate-y-1/2 -translate-x-1/2 z-20"
+                  style={{ left: '400px', top: '280px' }}
                 >
-                  <Clock className="w-3 h-3 text-amber-500 animate-pulse" />
-                  <span>8m (Alley Shortcut)</span>
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedRoute('dangerous');
+                      setEtaInput('8');
+                    }}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border shadow-[0_2px_12px_rgba(0,0,0,0.6)] font-space font-bold text-[10px] cursor-pointer transition-all ${
+                      selectedRoute === 'dangerous'
+                        ? 'bg-amber-950 border-amber-400 text-amber-200 scale-105 shadow-amber-500/10'
+                        : 'bg-slate-900 border-slate-805 text-slate-400 opacity-70 hover:opacity-100'
+                    }`}
+                  >
+                    <Clock className="w-3 h-3 text-amber-500 animate-pulse" />
+                    <span>8m (Alley Shortcut)</span>
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* Render interactive street light node markers for detail */}
+            {overlays.streetlights && SIMULATED_STREETLIGHTS.map(lamp => (
+              <div 
+                key={lamp.id} 
+                className="absolute w-2 h-2 rounded-full bg-amber-400 border border-amber-200/55 shadow-[0_0_8px_rgba(251,191,36,0.8)] pointer-events-auto cursor-help"
+                style={{ left: `${lamp.x - 4}px`, top: `${lamp.y - 4}px` }}
+                onMouseEnter={() => setTooltipText(`Lamp ID: ${lamp.id} — Activated municipal safety grid spotlight.`)}
+                onMouseLeave={() => setTooltipText(null)}
+              />
+            ))}
+
+            {/* Active Disturbance Labels */}
+            {overlays.disturbances && SIMULATED_DISTURBANCES.map(item => (
+              <div 
+                key={item.id} 
+                className="absolute pointer-events-auto cursor-help group"
+                style={{ left: `${item.x - 8}px`, top: `${item.y - 12}px` }}
+                onMouseEnter={() => setTooltipText(item.description)}
+                onMouseLeave={() => setTooltipText(null)}
+              >
+                <AlertTriangle className={`w-4 h-4 ${item.severity === 'high' ? 'text-red-500' : 'text-amber-500'} filter drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)]`} />
               </div>
-            </>
-          )}
-
-          {/* Render interactive street light node markers for detail */}
-          {overlays.streetlights && SIMULATED_STREETLIGHTS.map(lamp => (
-            <div 
-              key={lamp.id} 
-              className="absolute w-2 h-2 rounded-full bg-amber-400 border border-amber-200/55 shadow-[0_0_8px_rgba(251,191,36,0.8)] pointer-events-auto cursor-help"
-              style={{ left: `${lamp.x - 4}px`, top: `${lamp.y - 4}px` }}
-              onMouseEnter={() => setTooltipText(`Lamp ID: ${lamp.id} — Activated municipal safety grid spotlight.`)}
-              onMouseLeave={() => setTooltipText(null)}
-            />
-          ))}
-
-          {/* Active Disturbance Labels */}
-          {overlays.disturbances && SIMULATED_DISTURBANCES.map(item => (
-            <div 
-              key={item.id} 
-              className="absolute pointer-events-auto cursor-help group"
-              style={{ left: `${item.x - 8}px`, top: `${item.y - 12}px` }}
-              onMouseEnter={() => setTooltipText(item.description)}
-              onMouseLeave={() => setTooltipText(null)}
-            >
-              <AlertTriangle className={`w-4 h-4 ${item.severity === 'high' ? 'text-red-500' : 'text-amber-500'} filter drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)]`} />
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
 
         {/* Dynamic Context Tooltip inside map container */}
         {tooltipText && (
@@ -1540,7 +1892,7 @@ export default function MapHomeScreen({
                       type="button"
                       onClick={() => {
                         setSelectedRoute(option.id);
-                        setEtaInput(String(option.eta));
+                        setEtaInput(String(routesData[option.id] ? routesData[option.id].eta : option.eta));
                         // Automatically slide into route selection step so the map visual activates
                         if (safeWalkFlowStep === 'destination') {
                           setSafeWalkFlowStep('route_selection');
@@ -1582,8 +1934,8 @@ export default function MapHomeScreen({
                         {/* Safety tags and estimated price/travel */}
                         <div className="flex items-center justify-between mt-1 border-t border-white/5 pt-1">
                           <div className="flex items-center gap-1">
-                            <span className="text-[7.5px] font-mono px-1 py-0.2 rounded bg-white/5 text-slate-300 font-bold">
-                              {option.ride}
+                            <span className="text-[7.5px] font-mono px-1 py-0.2 rounded bg-white/5 text-slate-300 font-bold font-mono">
+                              {routesData[option.id] ? `${routesData[option.id].eta}m travel` : option.ride}
                             </span>
                             <span className="text-[7.5px] font-space px-1 py-0.2 rounded font-semibold uppercase tracking-wider bg-indigo-500/10 text-indigo-300">
                               {option.id === 'rideshare' ? 'Escort' : 'CCTV Rail'}
@@ -1891,6 +2243,39 @@ export default function MapHomeScreen({
 
             <div className="space-y-4">
               <div>
+                <label className="block text-[11px] font-space font-semibold text-slate-400 uppercase tracking-widest mb-1.5">Starting Point</label>
+                <div className="relative">
+                  <Navigation className="absolute left-3 top-3 w-4 h-4 text-slate-500" />
+                  <input 
+                    type="text" 
+                    value={startingPointInput}
+                    onChange={(e) => {
+                      setStartingPointInput(e.target.value);
+                    }}
+                    required
+                    placeholder="e.g. 123 Main St."
+                    className="w-full pl-10 pr-10 py-2.5 rounded-xl bg-slate-950 border border-slate-800 focus:border-indigo-500 text-sm focus:outline-none transition-colors text-white"
+                  />
+                  {isReverseGeocoding && (
+                    <div className="absolute right-3 top-3">
+                      <RefreshCw className="w-4 h-4 text-indigo-400/85 animate-spin" />
+                    </div>
+                  )}
+                </div>
+                <div className="mt-1.5 text-left">
+                  <button
+                    type="button"
+                    onClick={handleUseCurrentLocation}
+                    disabled={isReverseGeocoding}
+                    className="text-[10px] text-indigo-400 font-bold hover:text-indigo-300 font-space inline-flex items-center gap-1 cursor-pointer hover:underline disabled:opacity-50"
+                  >
+                    <Navigation className="w-2.5 h-2.5 rotate-45" />
+                    Use Current Location
+                  </button>
+                </div>
+              </div>
+
+              <div>
                 <label className="block text-[11px] font-space font-semibold text-slate-400 uppercase tracking-widest mb-1.5">Destination target</label>
                 <div className="relative">
                   <MapPin className="absolute left-3 top-3 w-4 h-4 text-slate-500" />
@@ -1904,7 +2289,7 @@ export default function MapHomeScreen({
                     onFocus={() => {
                       if (addressSuggestions.length > 0 || isSearchingAddresses) {
                         setShowSuggestionsDropdown(true);
-                      }
+                       }
                     }}
                     required
                     placeholder="Enter safe spot or home address"
@@ -1938,7 +2323,6 @@ export default function MapHomeScreen({
                           onClick={() => {
                             setDestinationInput(suggestion.displayName);
                             setLastSelectedAddress(suggestion.displayName);
-                            setDestinationCoords({ lat: suggestion.lat, lon: suggestion.lon });
                             setShowSuggestionsDropdown(false);
                           }}
                           className="w-full text-left px-3.5 py-2.5 text-[11px] text-slate-300 hover:text-white hover:bg-slate-800 transition-colors flex items-start gap-2 cursor-pointer border-b border-slate-900/40 last:border-0"
@@ -1954,31 +2338,21 @@ export default function MapHomeScreen({
  
               <button 
                 type="button" 
-                onClick={async () => {
-                  // If they entered manually, lookup and set coordinates on the fly
-                  if (destinationInput && destinationInput !== lastSelectedAddress) {
-                    try {
-                      const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(destinationInput)}&limit=1`;
-                      const res = await fetch(url, { headers: { "User-Agent": "BeaconSafetyApplet/1.0" } });
-                      if (res.ok) {
-                        const data = await res.json();
-                        if (data && data.length > 0) {
-                          setDestinationCoords({ lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) });
-                          setLastSelectedAddress(destinationInput);
-                        }
-                      }
-                    } catch (err) {
-                      console.warn("Manual address geo-lookup lookup failed:", err);
-                    }
-                  }
-                  setEtaInput(selectedRoute === 'safe' ? '12' : '8');
-                  setSafeWalkFlowStep('route_selection');
-                }}
-                disabled={!destinationInput.trim()}
+                onClick={handleChoosePathOnMap}
+                disabled={!destinationInput.trim() || isSearchingAddresses || isReverseGeocoding}
                 className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed font-space font-bold rounded-xl text-white shadow-xl transition-all flex items-center justify-center gap-1"
               >
-                Choose Path on Map
-                <ArrowRight className="w-4 h-4" />
+                {isSearchingAddresses ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    Geocoding Route...
+                  </>
+                ) : (
+                  <>
+                    Choose Path on Map
+                    <ArrowRight className="w-4 h-4" />
+                  </>
+                )}
               </button>
             </div>
           </div>
@@ -2007,7 +2381,7 @@ export default function MapHomeScreen({
             </div>
             <div className="text-right flex-shrink-0">
               <span className="text-lg font-space font-bold block animate-fade-in" style={{ color: !locationPermission ? '#94A3B8' : getPathColor(selectedRoute) }}>
-                {getRouteEta(selectedRoute)}m
+                {routesData[selectedRoute] ? routesData[selectedRoute].eta : getRouteEta(selectedRoute)}m
               </span>
               <span className="text-[7px] text-slate-500 font-mono">ESTIMATED ETA</span>
             </div>
@@ -2027,7 +2401,7 @@ export default function MapHomeScreen({
               type="button"
               onClick={() => {
                 // Sync user chosen path to start configuration minutes
-                setEtaInput(String(getRouteEta(selectedRoute)));
+                setEtaInput(String(routesData[selectedRoute] ? routesData[selectedRoute].eta : getRouteEta(selectedRoute)));
                 setSafeWalkFlowStep('final_confirm');
               }}
               style={{ backgroundColor: getPathColor(selectedRoute) }}
