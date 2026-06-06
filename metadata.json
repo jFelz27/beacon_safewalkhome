@@ -1,0 +1,6 @@
+{
+  "name": "Beacon",
+  "description": "A safety-prioritized navigation and route assistant designed for walking home securely at night, featuring streetlighting data, active disturbance logs, and active security check-ins.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

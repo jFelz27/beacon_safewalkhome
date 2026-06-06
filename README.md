@@ -1,2 +1,20 @@
-# beacon_safewalkhome
-Beacon offers users a navigation app that optimizes routes for safety based on ambient lighting, surrounding foot traffic, recent crime reports. Additionally, users can set alerts to notify friends/family via SMS message of travel plans and estimated arrival times, triggering safety alerts if users don't arrive safely to their destination on time.
+<div align="center">
+<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
+</div>
+
+# Run and deploy your AI Studio app
+
+This contains everything you need to run your app locally.
+
+View your app in AI Studio: https://ai.studio/apps/b767ab41-0ab2-4f2b-84c5-bc9a91aa1cb9
+
+## Run Locally
+
+**Prerequisites:**  Node.js
+
+
+1. Install dependencies:
+   `npm install`
+2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+3. Run the app:
+   `npm run dev`
