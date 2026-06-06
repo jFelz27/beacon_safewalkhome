@@ -5,6 +5,7 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
+    base: '/beacon_safewalkhome/',
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {
